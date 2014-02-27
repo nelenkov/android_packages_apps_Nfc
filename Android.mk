@@ -13,6 +13,9 @@ LOCAL_SRC_FILES := \
 LOCAL_SRC_FILES += \
         $(call all-java-files-under, nxp)
 
+LOCAL_SRC_FILES += \
+        src/com/google/android/apps/authenticator/IRemoteOtpSource.aidl
+
 LOCAL_PACKAGE_NAME := Nfc
 LOCAL_CERTIFICATE := platform
 
@@ -36,6 +39,9 @@ LOCAL_SRC_FILES := \
 
 LOCAL_SRC_FILES += \
         $(call all-java-files-under, nci)
+
+LOCAL_SRC_FILES += \
+        src/com/google/android/apps/authenticator/IRemoteOtpSource.aidl
 
 LOCAL_PACKAGE_NAME := NfcNci
 LOCAL_OVERRIDES_PACKAGES := Nfc

@@ -39,6 +39,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -59,6 +60,7 @@ import android.nfc.Tag;
 import android.nfc.TechListParcel;
 import android.nfc.TransceiveResult;
 import android.nfc.cardemulation.ApduServiceInfo;
+import android.nfc.tech.IsoDep;
 import android.nfc.tech.Ndef;
 import android.nfc.tech.TagTechnology;
 import android.os.AsyncTask;
@@ -76,6 +78,12 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.Log;
+
+import com.android.internal.policy.IKeyguardService;
+import com.google.android.apps.authenticator.IRemoteOtpSource;
+import com.yubico.yubioath.model.AppletSelectException;
+import com.yubico.yubioath.model.YubiKeyNeo;
+
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -83,6 +91,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ExecutionException;
 
@@ -157,7 +166,7 @@ public class NfcService implements DeviceHostListener {
     static final int EE_ERROR_NFC_DISABLED = -6;
 
     /** minimum screen state that enables NFC polling (discovery) */
-    static final int POLLING_MODE = SCREEN_STATE_ON_UNLOCKED;
+    static final int POLLING_MODE = SCREEN_STATE_ON_LOCKED;
 
     // Time to wait for NFC controller to initialize before watchdog
     // goes off. This time is chosen large, because firmware download
@@ -213,6 +222,14 @@ public class NfcService implements DeviceHostListener {
             "com.android.nfc_extras.action.SE_LISTEN_ACTIVATED";
     public static final String ACTION_SE_LISTEN_DEACTIVATED =
             "com.android.nfc_extras.action.SE_LISTEN_DEACTIVATED";
+
+    private static final boolean DEBUG_OTP = true;
+    private static final String KEYGUARD_PACKAGE = "com.android.keyguard";
+    private static final String KEYGUARD_CLASS = "com.android.keyguard.KeyguardService";
+    private static final String OTP_PACKAGE = "com.google.android.apps.remoteauthenticator";
+    private static final String OTP_CLASS = "com.google.android.apps.authenticator.OtpService";
+    private static final String YUBIKEY_LOCKSCREEN_ACCOUNT = "lockscreen";
+    private static final String OTP_SOURCE_LOCKSCREEN_ACCOUNT = "lockscreen";
 
     // NFC Execution Environment
     // fields below are protected by this
@@ -277,6 +294,12 @@ public class NfcService implements DeviceHostListener {
     private RegisteredAidCache mAidCache;
     private HostEmulationManager mHostEmulationManager;
     private AidRoutingManager mAidRoutingManager;
+
+    private IKeyguardService mKeyguardService = null;
+    private KeyguardServiceConnection mKeyguardConnection;
+
+    private IRemoteOtpSource mOtpSource = null;
+    private RemoteOtpSourceConnection mOtpConnection;
 
     private static NfcService sService;
 
@@ -437,6 +460,81 @@ public class NfcService implements DeviceHostListener {
         public int presenceCheckDelay;
     }
 
+    private class KeyguardServiceConnection implements ServiceConnection {
+        public void onServiceConnected(ComponentName className, IBinder service) {
+            Log.v(TAG, "onServiceConnected()");
+            mKeyguardService = IKeyguardService.Stub.asInterface(service);
+            try {
+                mKeyguardService.asBinder().linkToDeath(new IBinder.DeathRecipient() {
+                    @Override
+                    public void binderDied() {
+                        Log.e(TAG, "Oops! Keygued died");
+                    }
+                }, 0);
+            } catch (RemoteException e) {
+                Log.w(TAG, "Couldn't linkToDeath");
+                e.printStackTrace();
+            }
+        }
+
+        public void onServiceDisconnected(ComponentName className) {
+            Log.v(TAG, "onServiceDisconnected()");
+            mKeyguardService = null;
+        }
+    };
+
+    private class RemoteOtpSourceConnection implements ServiceConnection {
+        public void onServiceConnected(ComponentName className, IBinder service) {
+            Log.v(TAG, "onServiceConnected()");
+            mOtpSource = IRemoteOtpSource.Stub.asInterface(service);
+            try {
+                mOtpSource.asBinder().linkToDeath(new IBinder.DeathRecipient() {
+                    @Override
+                    public void binderDied() {
+                        Log.e(TAG, "Oops! OTP source died");
+                    }
+                }, 0);
+            } catch (RemoteException e) {
+                Log.w(TAG, "Couldn't linkToDeath");
+                e.printStackTrace();
+            }
+        }
+
+        public void onServiceDisconnected(ComponentName className) {
+            Log.v(TAG, "onServiceDisconnected()");
+            mOtpSource = null;
+        }
+    };
+
+    private void bindServices(Context ctx) {
+        if (mKeyguardConnection == null) {
+            mKeyguardConnection = new KeyguardServiceConnection();
+            Intent intent = new Intent();
+            intent.setClassName(KEYGUARD_PACKAGE, KEYGUARD_CLASS);
+            Log.v(TAG, "BINDING SERVICE: " + KEYGUARD_CLASS);
+            if (!ctx.bindService(intent, mKeyguardConnection, Context.BIND_AUTO_CREATE)) {
+                Log.v(TAG, "FAILED TO BIND TO KEYGUARD!");
+            }
+        } else {
+            Log.v(TAG, "Service already bound");
+        }
+
+        if (mOtpConnection == null) {
+            Log.d(TAG, "Binding to OTP...");
+            mOtpConnection = new RemoteOtpSourceConnection();
+            Intent intent = new Intent();
+            intent.setClassName(OTP_PACKAGE, OTP_CLASS);
+            Log.v(TAG, "BINDING SERVICE: " + OTP_CLASS);
+            if (!ctx.bindService(intent, mOtpConnection, Context.BIND_AUTO_CREATE)) {
+                Log.v(TAG, "FAILED TO BIND TO OTP!");
+            } else {
+                Log.d(TAG, "Bound to " + OTP_CLASS);
+            }
+        } else {
+            Log.v(TAG, "Service already bound");
+        }
+    }
+
     public NfcService(Application nfcApplication) {
         mNfcTagService = new TagService();
         mNfcAdapter = new NfcAdapterService();
@@ -529,6 +627,8 @@ public class NfcService implements DeviceHostListener {
 
             updatePackageCache();
         }
+
+        bindServices(nfcApplication);
 
         new EnableDisableTask().execute(TASK_BOOT);  // do blocking boot tasks
     }
@@ -2376,12 +2476,75 @@ public class NfcService implements DeviceHostListener {
                     return;
                 }
             }
+
+            // try to unlock before dispatching
+            if (!tryOtpUnlock(tag)) {
+                // don't dispatch if locked
+                return;
+            }
+
             if (!mNfcDispatcher.dispatchTag(tag)) {
                 unregisterObject(tagEndpoint.getHandle());
                 playSound(SOUND_ERROR);
             } else {
                 playSound(SOUND_END);
             }
+        }
+
+        private boolean tryOtpUnlock(Tag tag) {
+            try {
+                if (!mKeyguardService.isShowingAndNotHidden()) {
+                    return true;
+                }
+
+                IsoDep isoDep = IsoDep.get(tag);
+                if (isoDep == null) {
+                    return false;
+                }
+
+                YubiKeyNeo yn = new YubiKeyNeo(isoDep);
+                long timestamp = (System.currentTimeMillis() / 1000 + 10) / 30;
+                List<Map<String, String>> codes = yn.getCodes(timestamp);
+                if (DEBUG_OTP) {
+                    Log.d(TAG, "Yubikey codes: " + codes);
+                }
+                if (DEBUG_OTP) {
+                    Log.d(TAG, "OtpSource: " + mOtpSource);
+                }
+                String otp = mOtpSource.getNextCode(OTP_SOURCE_LOCKSCREEN_ACCOUNT);
+                if (DEBUG_OTP) {
+                    Log.d(TAG, "OTP: " + otp);
+                }
+                if (otp == null) {
+                    Log.d(TAG, String.format(
+                            "System OTP service not initialized or '%s' account not found.",
+                            OTP_SOURCE_LOCKSCREEN_ACCOUNT));
+
+                    return false;
+                }
+
+                String yubiCode = null;
+                for (Map<String, String> account : codes) {
+                    if (account.get("label").equals(YUBIKEY_LOCKSCREEN_ACCOUNT)) {
+                        yubiCode = account.get("code");
+                    }
+                }
+
+                if (yubiCode != null && otp.equals(yubiCode)) {
+                    mKeyguardService.keyguardDone(true, true);
+
+                    return true;
+                }
+            } catch (RemoteException e) {
+                Log.e(TAG, "Remote service error: " + e.getMessage(), e);
+            } catch (IOException e) {
+                Log.e(TAG, "Lost conection with tag: " + e.getMessage(), e);
+                e.printStackTrace();
+            } catch (AppletSelectException e) {
+                Log.w(TAG, "OTP applet not found: " + e.getMessage(), e);
+            }
+
+            return false;
         }
     }
 
