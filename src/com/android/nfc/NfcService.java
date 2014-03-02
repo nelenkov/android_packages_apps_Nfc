@@ -2492,6 +2492,12 @@ public class NfcService implements DeviceHostListener {
         }
 
         private boolean tryOtpUnlock(Tag tag) {
+            if (mKeyguardService == null || mOtpSource == null) {
+                Log.w(TAG, "KeyguardService or OTP source not connected.");
+
+                return false;
+            }
+
             try {
                 if (!mKeyguardService.isShowingAndNotHidden()) {
                     return true;
